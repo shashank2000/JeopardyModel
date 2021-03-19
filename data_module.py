@@ -19,7 +19,7 @@ class GaussianBlur(object):
         return x
         
 class VQADataModule(LightningDataModule):
-  def __init__(self, batch_size, threshold=10, num_workers=8, val_split=0.2, dumb_transfer=False, num_answers=0, transfer=False, multiple_images=False):
+  def __init__(self, batch_size, threshold=10, q_len=8, num_workers=8, val_split=0.2, num_answers=0, transfer=False, multiple_images=False):
     super().__init__()
     self.batch_size = batch_size
     self.val_split = val_split
@@ -63,8 +63,8 @@ class VQADataModule(LightningDataModule):
     self.answers_file = os.environ.get('ANSWERS_FILE')
     self.coco_loc = os.environ.get('COCO_LOC')   
     
-    saved_train_file = 'train{}_correct_padding.pt'.format(self.is_dumb(dumb_transfer, num_answers, multiple_images))
-    saved_test_file = 'test{}_correct_padding.pt'.format(self.is_dumb(dumb_transfer, num_answers, multiple_images))
+    saved_train_file = 'train{}.pt'.format(self.file_name(multiple_images))
+    saved_test_file = 'test{}.pt'.format(self.file_name(multiple_images))
 
     try:
         self.train_dataset = torch.load(saved_train_file)
@@ -76,9 +76,10 @@ class VQADataModule(LightningDataModule):
           self.questions_file, 
           self.answers_file, 
           self.coco_loc, 
-          self.train_transform, num_answers=num_answers, 
-          frequency_threshold=threshold, train=True, 
-          dumb_transfer=dumb_transfer,
+          self.train_transform,
+          frequency_threshold=threshold, 
+          q_len=q_len,
+          train=True, 
           multiple_images=multiple_images)
         self.test_dataset = JeopardyDataset(
           self.questions_file, 
@@ -86,21 +87,12 @@ class VQADataModule(LightningDataModule):
           self.coco_loc, 
           self.test_transform, 
           frequency_threshold=threshold,
-          word2idx=self.train_dataset.word2idx, 
-          most_common_answers=self.train_dataset.most_common_answers, 
-          dumb_transfer=dumb_transfer, 
-          num_answers=num_answers, 
           train=False)
         
         torch.save(self.train_dataset, saved_train_file)
         torch.save(self.test_dataset, saved_test_file)
-
+    breakpoint()
     self.num_workers = num_workers
-    self.vl = self.get_vocab_length()
-    self.idx_to_word = {v: k for k, v in self.train_dataset.word2idx.items()}
-    if dumb_transfer:
-      num_answer_classes = len(self.train_dataset.most_common_answers) 
-      assert(num_answer_classes == num_answers)
     
   def train_dataloader(self):
       return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True,
@@ -110,14 +102,9 @@ class VQADataModule(LightningDataModule):
       return DataLoader(self.test_dataset, batch_size=self.batch_size,
                         num_workers=self.num_workers, pin_memory=True, drop_last=True)
 
-  def get_vocab_length(self):
-    return self.train_dataset.vocabulary_length()
-
+  # TODO: fix the data caching stuff
   @staticmethod
-  def is_dumb(transfer_type, num_answers, multiple_images):
-    if transfer_type:
-      return "_dumb_" + str(num_answers)
-    else:
-      if multiple_images:
-        return "_multiple_"
-      return ""
+  def file_name(multiple_images):
+    if multiple_images:
+      return "multiple"
+    return ""
