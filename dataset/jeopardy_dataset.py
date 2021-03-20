@@ -6,22 +6,23 @@ import torch
 import os
 import string
 from tqdm import tqdm
-import nltk
 from transformers import RobertaTokenizer
 from collections import Counter
+from transformers.data.data_collator import DataCollatorForLanguageModeling
 
 UNK_TOKEN = "<unk>"
 
+# TODO: no restriction on answers
 class JeopardyDataset(Dataset):
     def __init__(self, 
-        questions_file, 
-        answers_file, 
-        images_dir, 
-        transform, 
+        questions_file=None, 
+        answers_file=None, 
+        images_dir=None, 
+        transform=None, 
         train=True, 
         q_len=8, 
         ans_len=1, 
-        test_split=0.2, 
+        test_split=0.2,
         frequency_threshold=8, 
         multiple_images=False):
         """
@@ -50,12 +51,12 @@ class JeopardyDataset(Dataset):
         
         # we want only 80% of the question/answer text to build the vocabulary
         self.answers = json.load(a_f)["annotations"]
-        self.questions = json.load(q_f)["questions"]
+        self.questions = json.load(q_f)
 
-        # TODO: only need to pick the answers we are looking at,
-        #  everything else will follow
+        # don't need to worry about shuffling here because the questions
+        # in the file are in random order (ctsy utils.model_utils:shuffled_questions_file()) 
         split_index = int((1-test_split) * len(self.questions))
-
+        
         if train:
             self.questions = self.questions[:split_index]
             self.answers = self.answers[:split_index]
@@ -72,19 +73,18 @@ class JeopardyDataset(Dataset):
         self.question_to_answer = self._find_answers()
         self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 
-        # filter down questions_dict based on the answer set we selected above
+        # filter down questions_dict based on the answer set self.frequent_answers
         questions_dict = self.filter_questions_dict(questions_dict)
         
         self.return_array = [0] * len(questions_dict)
         
         self.i = 0
-        # figure out what to do with the attention mask
         for q in tqdm(questions_dict):
             entry = questions_dict[q]
-            question_text = self.tokenizer(entry[0], return_tensors='pt', padding='max_length', truncation=True, max_length=self.q_len)['input_ids']
+            question_text = entry[0]
             image_id = entry[1]
-            answer_text = self.tokenizer(self.question_to_answer[q], return_tensors='pt', padding='max_length', truncation=True, max_length=self.ans_len)['input_ids'], # dealing with only 1 word answers
-            self.return_array[self.i] = question_text, image_id, answer_text 
+            answer_text = self.question_to_answer[q]
+            self.return_array[self.i] = question_text, image_id, answer_text
             self.i += 1
         
 
@@ -154,19 +154,47 @@ class JeopardyDataset(Dataset):
             image_id = int(id_and_extension.split('.')[0])
             id_to_filename[image_id] = filename
         return id_to_filename
-
-    def get_split_index(self):
-        '''
-        Returns the start index of the test split for the dataloader to use.
-        '''
-        return self.test_split_start
     
     def __len__(self):
         return self.i
+    
+    def _process_question(self, question_text):
+        tokenized_question = self.tokenizer(
+            question_text, return_tensors='pt', padding='max_length', truncation=True, max_length=self.q_len+2)
+        contrastive_input = tokenized_question["input_ids"].clone()
+        collator = DataCollatorForLanguageModeling(
+            self.tokenizer,
+            mlm=True,
+            mlm_probability=0.15,
+        )
+        input_ids, labels = collator.mask_tokens(contrastive_input)
+        tokenized_question['labels'] = labels
+        tokenized_question['contrastive_input'] = contrastive_input
+        tokenized_question['input_ids'] = input_ids # make sure masking happens sometimes
+        return tokenized_question
+
+    def _process_answer(self, answer_text):
+        # no masking right now in the answers
+        tokenized_answer = self.tokenizer(
+            answer_text, return_tensors='pt', padding='max_length', truncation=True, max_length=self.ans_len+2)
+        contrastive_input = tokenized_answer["input_ids"].clone()
+        collator = DataCollatorForLanguageModeling(
+            self.tokenizer,
+            mlm=True,
+            mlm_probability=0.15,
+        )
+        input_ids, labels = collator.mask_tokens(contrastive_input)
+        tokenized_answer['labels'] = labels
+        tokenized_answer['contrastive_input'] = contrastive_input
+        tokenized_answer['input_ids'] = input_ids # make sure masking happens sometimes
+        return tokenized_answer
 
     def __getitem__(self, idx):
-        # convert image id to image tensor on demand, not stored in RAM like that
+        # question = BatchEncoding({'attention_mask': [], 'input_ids': []}
         question, image_id, answer = self.return_array[idx]
+        question = self._process_question(question)
+        answer = self._process_answer(answer)
+        # we only mask question tokens, in the mlm objective, not the contrastive objective
         path = os.path.join(self.images_dir, self.image_id_to_filename[image_id])
         img = self.transform(Image.open(path).convert('RGB'))
         if self.multiple_images:

@@ -6,18 +6,18 @@
     "cuda": true,
     "seed": 1337,
     "model_params": {
-        "alpha": 0.1,
+        "alpha": 0.5,
         "threshold": 10,
         "q_len": 8
     },
     "optim_params": {
-        "batch_size": 256,
+        "batch_size": 8,
         "learning_rate": 0.3,
         "momentum": 0.9,
         "weight_decay": 1e-6
     },
     "multiple_images": true,
-    "num_workers": 16,
+    "num_workers": 0,
     "num_epochs": 200,
     "validate": true,
     "copy_checkpoint_freq": 5,
