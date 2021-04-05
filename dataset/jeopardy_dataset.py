@@ -9,13 +9,22 @@ from tqdm import tqdm
 from transformers import RobertaTokenizer
 from collections import Counter
 from transformers.data.data_collator import DataCollatorForLanguageModeling
-
+import random
 UNK_TOKEN = "<unk>"
 
-# TODO: no restriction on answers
+'''
+a_len_dict is 
+Counter({1: 76810, 2: 20371, 3: 8048, 4: 940, 5: 231, 6: 56, 7: 7, 12: 2, 9: 2, 8: 2, 14: 1})
+q_len_dict is
+Counter({6: 25604, 7: 21249, 8: 18387, 5: 13061, 9: 12253, 10: 6294,
+ 11: 3386, 4: 2474, 12: 1902, 13: 1014,
+  14: 564, 15: 324, 16: 181, 17: 113, 
+  18: 77, 19: 48, 20: 34, 21: 24, 22: 6, 
+  23: 2, 3: 2, 24: 2})
+'''
 class JeopardyDataset(Dataset):
     def __init__(self, 
-        questions_file=None, 
+        questions=[], 
         answers_file=None, 
         images_dir=None, 
         transform=None, 
@@ -24,10 +33,11 @@ class JeopardyDataset(Dataset):
         ans_len=1, 
         test_split=0.2,
         frequency_threshold=8, 
-        multiple_images=False):
+        multiple_images=False,
+        mlm_probability=0.15):
         """
         Args:
-            questions_file (string): Path to the json file with questions.
+            questions (string): List of the questions in random order.
             answers_file (string): Path to the json file with annotations.
             images_dir (string): Directory with all the images.
             transform (callable, optional): Optional transform to be applied
@@ -40,21 +50,20 @@ class JeopardyDataset(Dataset):
 
         """
         self.multiple_images = multiple_images
+        self.mlm_probability = mlm_probability
         # initializing the lengths of our questions and answers
         self.q_len = q_len
         self.ans_len = ans_len
         # return test or train set?
         self.train = train
 
-        q_f = open(questions_file, 'r')
         a_f = open(answers_file, 'r')
         
         # we want only 80% of the question/answer text to build the vocabulary
         self.answers = json.load(a_f)["annotations"]
-        self.questions = json.load(q_f)
+        self.questions = questions
 
-        # don't need to worry about shuffling here because the questions
-        # in the file are in random order (ctsy utils.model_utils:shuffled_questions_file()) 
+        # don't need to worry about shuffling here because the questions are in random order
         split_index = int((1-test_split) * len(self.questions))
         
         if train:
@@ -71,6 +80,8 @@ class JeopardyDataset(Dataset):
         self.transform = transform    
         self.frequent_answers = self._find_frequent_answers(frequency_threshold)
         self.question_to_answer = self._find_answers()
+
+        # we use a pretrained tokenizer when returning tokens for questions and answers
         self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 
         # filter down questions_dict based on the answer set self.frequent_answers
@@ -83,9 +94,12 @@ class JeopardyDataset(Dataset):
             entry = questions_dict[q]
             question_text = entry[0]
             image_id = entry[1]
-            answer_text = self.question_to_answer[q]
-            self.return_array[self.i] = question_text, image_id, answer_text
+            answer_set = self.question_to_answer[q]
+            self.return_array[self.i] = question_text, image_id, answer_set
             self.i += 1
+
+        self.q_len_dict = Counter()
+        self.a_len_dict = Counter()
         
 
 
@@ -96,53 +110,56 @@ class JeopardyDataset(Dataset):
                 new_questions_dict[q] = question_dict[q]
         return new_questions_dict
 
-    def _find_frequent_answers(self, threshold, only_one_word_answers=True, only_yes_confidence=False):
+    def _find_frequent_answers(self, threshold):
         '''
             We create a set of answers across the dataset such that each member of this set has been the answer
-            to a question at least *threshold* times. This is done so we are working with a smaller more refined 
-            answer set at the end of the day. We also filter the set of answers so we are dealing with only 
-            answer_confidence deals with the subject's confidence in answering the question, we are currently filtering
-            so its only yes's considered. I believe no and maybe are two other categories. 
+            to a question (with confidence 'yes' or 'maybe') at least *threshold* times. 
+            We pick one of these at random in __getitem__ to get diverse views.
+            This is done so we are working with a smaller more refined answer set at the end of the day.  
         '''
         # TODO: more enlightened way of filtering answers. Check past VQA papers. 
         word_freq = Counter([])
+
         for i, ann in tqdm(enumerate(self.answers)):
             for answer in ann['answers']:
                 actual_ans = answer['answer']
-                if only_one_word_answers and " " in actual_ans:
-                        continue
-                if only_yes_confidence:
-                    if answer['answer_confidence'] != 'yes':
-                        continue
-                word_freq[actual_ans] += 1
-    
+                if answer['answer_confidence'] != 'no':
+                    word_freq[actual_ans] += 1
+
         return set([word for word in word_freq if word_freq[word] >= threshold])
         
 
     def _find_answers(self):
         """
-            There several answers for each question in the dataset, for example, 
-            here's entry 0 of the answer vector for a random question:
-            {"answer": "net", "answer_confidence": "maybe", "answer_id": 1}
+            Each entry in self.answers is a list of answers that match to a specific
+            question id. There are several answers for each question, for example, 
+            here's entry 0 of a random element of self.answers:
+            {"answer": "net", "answer_confidence": "maybe", "answer_id": 1}.
+
+            For each candidate answer, we check to see if it is in self.frequent_answers,
+            i.e. it has shown up *threshold* times, with confidence "yes" or "maybe" each
+            time. If it is, we include it in the set of answers for the question id. 
             
-            For the sake of simplicity, we only consider answers that have answer_confidence: yes,
-            and are exactly one word long. We will apply a similar padding paradigm as we do with the question
-            texts later on, by using the _pad_arr function. One to one correspondence between answers and questions, 
-            as in there is one answers object for each question, and so its fair to go only until the test split for both.
+            With threshold=10, there are 1683 questions with an empty answer set (none of their
+            possible answers showed up in the dataset at least 10 times), and 
+            353322 questions with valid answer sets
+
+            Relevant paper: https://arxiv.org/abs/1708.02711
         """
         
         question_to_answer = {}
         num_unknowns = 0
         for i, ann in tqdm(enumerate(self.answers)):
-            question_to_answer[ann["question_id"]] = UNK_TOKEN
+            question_to_answer[ann["question_id"]] = set()
             for answer in ann['answers']:
                 actual_ans = answer['answer']
                 if actual_ans in self.frequent_answers:
-                    question_to_answer[ann["question_id"]] = actual_ans
-                    break
-            if question_to_answer[ann["question_id"]] == UNK_TOKEN:
+                    question_to_answer[ann["question_id"]].add(actual_ans)
+
+            if len(question_to_answer[ann["question_id"]]) == 0:
                 num_unknowns += 1
-        print("{} unknown answers, {} known answers".format(str(num_unknowns), str(len(self.answers) - num_unknowns)))
+                question_to_answer[ann["question_id"]].add(UNK_TOKEN)
+        print("{} questions with no good answer, {} questions with valid answer sets".format(str(num_unknowns), str(len(self.answers) - num_unknowns)))
         return question_to_answer
 
     def _find_images(self):
@@ -159,21 +176,35 @@ class JeopardyDataset(Dataset):
         return self.i
     
     def _process_question(self, question_text):
+        # running an experiment
+        # tokenized_question = self.tokenizer(
+        #     question_text, return_tensors='pt')
+        # contrastive_input = tokenized_question["input_ids"].clone()
+        # # includes start and end
+        # lengthOfInput = len(contrastive_input[0])
+        # self.q_len_dict[lengthOfInput - 2] += 1
+
         tokenized_question = self.tokenizer(
             question_text, return_tensors='pt', padding='max_length', truncation=True, max_length=self.q_len+2)
         contrastive_input = tokenized_question["input_ids"].clone()
         collator = DataCollatorForLanguageModeling(
             self.tokenizer,
             mlm=True,
-            mlm_probability=0.15,
+            mlm_probability=self.mlm_probability,
         )
         input_ids, labels = collator.mask_tokens(contrastive_input)
-        tokenized_question['labels'] = labels
+        tokenized_question['mlm_labels'] = labels
         tokenized_question['contrastive_input'] = contrastive_input
-        tokenized_question['input_ids'] = input_ids # make sure masking happens sometimes
+        tokenized_question['mlm_input'] = input_ids # make sure masking happens sometimes
         return tokenized_question
 
     def _process_answer(self, answer_text):
+
+        # tokenized_answer = self.tokenizer(
+        #     answer_text, return_tensors='pt')
+        # contrastive_input = tokenized_answer["input_ids"].clone()
+        # lengthOfInput = len(contrastive_input[0])
+        # self.a_len_dict[lengthOfInput - 2] += 1
         # no masking right now in the answers
         tokenized_answer = self.tokenizer(
             answer_text, return_tensors='pt', padding='max_length', truncation=True, max_length=self.ans_len+2)
@@ -181,19 +212,22 @@ class JeopardyDataset(Dataset):
         collator = DataCollatorForLanguageModeling(
             self.tokenizer,
             mlm=True,
-            mlm_probability=0.15,
+            mlm_probability=self.mlm_probability,
         )
         input_ids, labels = collator.mask_tokens(contrastive_input)
-        tokenized_answer['labels'] = labels
+        tokenized_answer['mlm_labels'] = labels
         tokenized_answer['contrastive_input'] = contrastive_input
-        tokenized_answer['input_ids'] = input_ids # make sure masking happens sometimes
+        tokenized_answer['mlm_input'] = input_ids # make sure masking happens sometimes
         return tokenized_answer
 
     def __getitem__(self, idx):
         # question = BatchEncoding({'attention_mask': [], 'input_ids': []}
-        question, image_id, answer = self.return_array[idx]
+        
+        question, image_id, answer_set = self.return_array[idx]
         question = self._process_question(question)
+        answer = random.choice(tuple(answer_set))
         answer = self._process_answer(answer)
+        
         # we only mask question tokens, in the mlm objective, not the contrastive objective
         path = os.path.join(self.images_dir, self.image_id_to_filename[image_id])
         img = self.transform(Image.open(path).convert('RGB'))

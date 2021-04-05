@@ -10,6 +10,7 @@ import random
 import torch
 import os
 import json 
+from tqdm import tqdm
 
 class GaussianBlur(object):
     """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
@@ -21,11 +22,19 @@ class GaussianBlur(object):
         return x
         
 class VQADataModule(LightningDataModule):
-  def __init__(self, batch_size, threshold=10, q_len=8, num_workers=8, val_split=0.2, num_answers=0, transfer=False, multiple_images=False):
+  def __init__(self, 
+              batch_size, 
+              threshold=10, 
+              q_len=8, 
+              ans_len=1,
+              num_workers=8, 
+              val_split=0.2, 
+              num_answers=0, 
+              transfer=False, 
+              multiple_images=False, 
+              mlm_probability=0.15):
     super().__init__()
-
-    self.questions_file = self._make_shuffled_questions_file()
-
+    self.questions_file = os.environ.get('QUESTIONS_FILE')
     self.answers_file = os.environ.get('ANSWERS_FILE')
     self.coco_loc = os.environ.get('COCO_LOC')   
 
@@ -78,27 +87,47 @@ class VQADataModule(LightningDataModule):
     except:
         print(saved_train_file + " not found")
 
-        # threshold will be important when doing finetuning
+        # we shuffle the questions to get rid of any biases that might exist
+        question_list = self._shuffle_questions()
+
         self.train_dataset = JeopardyDataset(
-          questions_file=self.questions_file, 
+          questions=question_list, 
+          q_len=q_len,
+          ans_len=ans_len,
           answers_file=self.answers_file, 
           images_dir=self.coco_loc, 
           transform=self.train_transform,
           frequency_threshold=threshold, 
           train=True,
-          multiple_images=multiple_images)
+          multiple_images=multiple_images,
+          mlm_probability=mlm_probability)
 
         self.test_dataset = JeopardyDataset(
-          questions_file=self.questions_file, 
+          questions=question_list, 
           answers_file=self.answers_file, 
           images_dir=self.coco_loc, 
           transform=self.train_transform,
           frequency_threshold=threshold, 
           train=False,
-          multiple_images=multiple_images)
+          multiple_images=multiple_images,
+          mlm_probability=mlm_probability)
+    
         
         torch.save(self.train_dataset, saved_train_file)
         torch.save(self.test_dataset, saved_test_file)
+    # for a in tqdm(range(len(self.train_dataset))):
+    #   b = self.train_dataset[a]
+    #   if a % 1000 == 0:
+    #     print("a_len_dict is ")
+    #     print(self.train_dataset.a_len_dict)
+    #     print("q_len_dict is ")
+    #     print(self.train_dataset.q_len_dict)
+      
+    # print("a_len_dict is ")
+    # print(self.train_dataset.a_len_dict)
+    # print("q_len_dict is ")
+    # print(self.train_dataset.q_len_dict)
+    
     self.num_workers = num_workers
     
   def train_dataloader(self):
@@ -112,10 +141,8 @@ class VQADataModule(LightningDataModule):
       return "multiple"
     return ""
 
-  def _make_shuffled_questions_file(self):
-    # if there is no shuffled questions file, make one
-    shuffled_questions_file = os.environ.get('SHUFFLED_QUESTIONS_FILE')
-    if not os.path.isfile(shuffled_questions_file):
-      original_questions_file = os.environ.get('QUESTIONS_FILE')
-      make_shuffled_questions_file(original_questions_file, shuffled_questions_file)
-    return shuffled_questions_file
+  def _shuffle_questions(self):
+    q_f = open(self.questions_file, 'r')
+    questions = json.load(q_f)["questions"]
+    random.shuffle(questions)
+    return questions

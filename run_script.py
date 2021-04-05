@@ -25,8 +25,9 @@ def run(config_path, gpu_device=None):
     wandb_logger = pl.loggers.WandbLogger(name=config.run_name, project=config.exp_name)
     dm = VQADataModule(
         batch_size=config.optim_params.batch_size, q_len=mp.q_len,
-        num_workers=config.num_workers, multiple_images=multiple_images, 
-        threshold=mp.threshold)
+        ans_len=mp.ans_len, num_workers=config.num_workers,
+        multiple_images=multiple_images, threshold=mp.threshold, 
+        mlm_probability=mp.mlm_probability)
 
     model = None
     if config.system == "jeopardy":
