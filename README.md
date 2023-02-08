@@ -11,4 +11,4 @@ To get up and running, make a conda virtual environment using the enviroment.yml
 
 Install dependencies `pip3 install -r requirements.txt`
 
-And get off to the races with `python3 run_script.py --gpu-device 0 --config config`
+And get off to the races with `python3 run_script.py --gpu-device 0 --config config/v1model-oscar.json`
